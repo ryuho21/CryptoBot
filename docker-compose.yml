@@ -1,0 +1,98 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trading-bot-advanced
+    restart: unless-stopped
+    
+    environment:
+      - OKX_API_KEY=${OKX_API_KEY}
+      - OKX_API_SECRET=${OKX_API_SECRET}
+      - OKX_PASSPHRASE=${OKX_PASSPHRASE}
+      - OKX_IS_TESTNET=${OKX_IS_TESTNET:-true}
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - TRADING_MODE=${TRADING_MODE:-paper}
+      - SYMBOL=${SYMBOL:-BTC/USDT:USDT}
+      - TIMEFRAME=${TIMEFRAME:-1m}
+      - INITIAL_BALANCE=${INITIAL_BALANCE:-100000}
+      - ENABLE_REGIME_DETECTION=${ENABLE_REGIME_DETECTION:-1}
+      - ENABLE_MULTI_ASSET=${ENABLE_MULTI_ASSET:-0}
+      - ENABLE_ORDER_BOOK=${ENABLE_ORDER_BOOK:-0}
+      - USE_CUDA=${USE_CUDA:-0}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONUNBUFFERED=1
+    
+    # FIXED: Named volumes instead of bind mounts
+    volumes:
+      - trading-data:/app/runs
+      - trading-logs:/app/logs
+    
+    ports:
+      - "8080:8080"
+      - "8501:8501"
+    
+    networks:
+      - trading-network
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import torch; import ccxt; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-bot-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=tradingbot
+      - POSTGRES_USER=tradingbot
+      - POSTGRES_PASSWORD=tradingpass
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradingbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: trading-bot-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  trading-network:
+    driver: bridge
+
+volumes:
+  trading-data:
+    driver: local
+  trading-logs:
+    driver: local
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
