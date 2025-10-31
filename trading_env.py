@@ -1,10 +1,9 @@
-# trading_env.py - FIXED VERSION WITH PROPER REWARDS
+# trading_env.py - PRODUCTION-READY TRADING ENVIRONMENT
 """
 Complete trading environment with:
-- FIXED: Proper reward magnitudes
-- FIXED: No penalty for opening positions
-- FIXED: Better stop-loss/take-profit incentives
 - Proper observation/action spaces
+- Reward shaping
+- Stop-loss/take-profit
 - Curriculum learning integration
 - Performance metrics
 """
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class TradingBotEnv(gym.Env):
     """
-    Production-ready trading environment with FIXED rewards.
+    Production-ready trading environment.
     
     Observation space:
         Dict with:
@@ -202,7 +201,6 @@ class TradingBotEnv(gym.Env):
     def _update_unrealized_pnl(self, price: float) -> float:
         """
         Calculate unrealized PnL change as reward.
-        FIXED: Increased reward magnitude from 0.1 to 10.0
         
         Returns:
             reward: float
@@ -218,7 +216,7 @@ class TradingBotEnv(gym.Env):
         else:  # Short
             pnl = (self.entry_price - price) * abs(position)
         
-        # FIXED: Increased from 0.1 to 10.0 for stronger learning signal
+        # Reward as percentage of initial balance (normalized)
         reward = np.tanh(pnl / self.initial_balance) * 10.0
         
         return reward
@@ -226,7 +224,6 @@ class TradingBotEnv(gym.Env):
     def _execute_trade_action(self, action: int, price: float) -> float:
         """
         Execute trading action and return reward.
-        FIXED: No penalty for opening positions, increased realized PnL rewards
         
         Args:
             action: 0=HOLD, 1=BUY, 2=SELL
@@ -279,7 +276,7 @@ class TradingBotEnv(gym.Env):
             self.risk_manager.net_worth += net_pnl
             self.risk_manager.update_metrics(self.risk_manager.net_worth)
             
-            # FIXED: Increased from 50.0 to 100.0 for stronger signal
+            # Reward proportional to PnL
             reward = (net_pnl / self.initial_balance) * 100.0
             
             # Log trade
@@ -302,8 +299,7 @@ class TradingBotEnv(gym.Env):
             commission = abs(new_position) * price * self.commission
             self.risk_manager.net_worth -= commission
             
-            # FIXED: Changed from -commission * 5.0 to 0.0 (neutral)
-            # Let the closing PnL determine if opening was good
+            # Small penalty for opening (encourages selective trading)
             reward = 0.0
             
             # Log trade
@@ -319,7 +315,6 @@ class TradingBotEnv(gym.Env):
         else:
             commission = abs(new_position - position) * price * self.commission
             self.risk_manager.net_worth -= commission
-            # FIXED: Reduced from -2.0 to -0.5
             reward = -self.commission * 0.5
         
         return reward
@@ -327,7 +322,6 @@ class TradingBotEnv(gym.Env):
     def _check_stop_loss_take_profit(self, price: float) -> float:
         """
         Check and execute stop-loss or take-profit.
-        FIXED: Increased penalties/rewards for stronger learning
         
         Returns:
             reward: float
@@ -347,16 +341,14 @@ class TradingBotEnv(gym.Env):
                 logger.info(f"🛑 Stop-loss triggered: {pnl_pct:.2%}")
                 success, _ = self.exchange_manager.execute_order('SELL', price, position * price)
                 if success:
-                    # FIXED: Increased penalty from -10.0 to -50.0
-                    reward = -50.0
+                    reward = -50.0  # Penalty for stop-loss
             
             # Take profit
             elif pnl_pct >= self.config.take_profit_pct:
                 logger.info(f"💰 Take-profit triggered: {pnl_pct:.2%}")
                 success, _ = self.exchange_manager.execute_order('SELL', price, position * price)
                 if success:
-                    # FIXED: Increased reward from 5.0 to 20.0
-                    reward = 20.0
+                    reward = 20.0  # Reward for take-profit
         
         else:  # Short position
             pnl_pct = (self.entry_price - price) / self.entry_price
@@ -366,7 +358,6 @@ class TradingBotEnv(gym.Env):
                 logger.info(f"🛑 Stop-loss triggered: {pnl_pct:.2%}")
                 success, _ = self.exchange_manager.execute_order('BUY', price, abs(position) * price)
                 if success:
-                    # FIXED: Increased penalty from -10.0 to -50.0
                     reward = -50.0
             
             # Take profit
@@ -374,7 +365,6 @@ class TradingBotEnv(gym.Env):
                 logger.info(f"💰 Take-profit triggered: {pnl_pct:.2%}")
                 success, _ = self.exchange_manager.execute_order('BUY', price, abs(position) * price)
                 if success:
-                    # FIXED: Increased reward from 5.0 to 20.0
                     reward = 20.0
         
         return reward
@@ -476,6 +466,6 @@ class TradingBotEnv(gym.Env):
             'sortino_ratio': sortino,
             'max_drawdown': self.risk_manager.max_drawdown,
             'win_rate': win_rate,
-            'num_trades': total_trades,
-            'final_balance': equity[-1]
+            'total_trades': total_trades,
+            'final_net_worth': equity[-1]
         }
