@@ -50,7 +50,7 @@ class Config:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
-    entropy_beta: float = 0.005
+    entropy_beta: float = 0.01
     
     learning_rate_actor: float = 1e-4
     learning_rate_critic: float = 3e-4
@@ -80,12 +80,12 @@ class Config:
     normalize_obs: bool = True
     
     # ========== RISK MANAGEMENT ==========
-    kelly_criterion_fraction: float = 0.15
+    kelly_criterion_fraction: float = 0.25
     max_position_leverage: float = 3.0
     max_position_size: float = 0.25
     max_drawdown_pct: float = 0.15
-    stop_loss_pct: float = 0.02
-    take_profit_pct: float = 0.04
+    stop_loss_pct: float = 0.03  # 3%
+    take_profit_pct: float = 0.06  # 6%
     
     trade_throttle_seconds: int = 5
     max_trades_per_minute: int = 5
