@@ -42,6 +42,9 @@ from ab_testing_framework import ABTestFramework
 from main import (initialize_system, train_loop, evaluate_agent, 
                  JSONLLogger, MetricsTracker)
 
+import torch
+import torch.nn.functional as F
+from data_augmentation import MarketScenarioGenerator
 
 class AdvancedTradingSystem:
     """
