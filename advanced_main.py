@@ -209,6 +209,22 @@ class AdvancedTradingSystem:
                     logits, _, _ = self.agent.policy(obs_tensor, self.agent.h_state)
                     probs = F.softmax(logits, dim=-1)
                     confidence = probs[0, action].item()
+
+                # ADD THIS - Log confidence
+                with torch.no_grad():
+                    logits = self.agent.policy(obs_tensor, self.agent.h_state)[0]
+                    probs = F.softmax(logits, dim=-1)
+                    confidence = probs[0, action].item()
+
+                # Only trade if confident
+                MIN_CONFIDENCE = 0.60  # 60% minimum
+                if action != 0 and confidence < MIN_CONFIDENCE:
+                    print(f"  ⚠️ Low confidence ({confidence:.1%}) - forcing HOLD")
+                    action = 0  # Force HOLD
+
+                # Log high-confidence trades
+                if action != 0:
+                    print(f"  🎯 Trading: {['HOLD', 'BUY', 'SELL'][action]} (confidence: {confidence:.1%})")
                 
                 # ========== CONFIDENCE FILTER ==========
                 original_action = action
