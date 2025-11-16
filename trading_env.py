@@ -1,17 +1,8 @@
-# trading_env.py - PRODUCTION-READY TRADING ENVIRONMENT
-"""
-Complete trading environment with:
-- Proper observation/action spaces
-- Reward shaping
-- Stop-loss/take-profit
-- Curriculum learning integration
-- Performance metrics
-"""
-
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from typing import Dict, Tuple, Optional
+from collections import deque
 import logging
 
 from config import Config
@@ -24,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class TradingBotEnv(gym.Env):
     """
-    Production-ready trading environment.
+    Production-ready trading environment with IMPROVED REWARDS.
     
     Observation space:
         Dict with:
@@ -81,6 +72,24 @@ class TradingBotEnv(gym.Env):
         # Performance tracking
         self.equity_curve = []
         self.trade_log = []
+        
+        # NEW: Improved reward tracking
+        self.recent_returns = deque(maxlen=100)
+        self.consecutive_wins = 0
+        self.consecutive_losses = 0
+        self.winning_trades = 0
+        self.time_in_position = 0
+        self.last_portfolio_value = self.initial_balance
+        
+        # Reward component weights (can tune these)
+        self.reward_weights = {
+            'pnl': 1.0,              # Primary: profit/loss
+            'opportunity_cost': 0.2, # Penalty: missing trends
+            'holding_bonus': 0.15,   # Bonus: riding winners
+            'action_penalty': 1.0,   # Cost: trading fees
+        }
+        
+        logger.info("✅ TradingBotEnv initialized with IMPROVED REWARDS")
     
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[Dict, Dict]:
         """Reset environment to initial state."""
@@ -101,6 +110,14 @@ class TradingBotEnv(gym.Env):
         self.equity_curve = [self.initial_balance]
         self.trade_log = []
         
+        # NEW: Reset improved tracking
+        self.recent_returns.clear()
+        self.consecutive_wins = 0
+        self.consecutive_losses = 0
+        self.winning_trades = 0
+        self.time_in_position = 0
+        self.last_portfolio_value = self.initial_balance
+        
         # Update curriculum
         self.curriculum.update({"episode_reward": 0})
         
@@ -111,7 +128,7 @@ class TradingBotEnv(gym.Env):
     
     def step(self, action: int) -> Tuple[Dict, float, bool, bool, Dict]:
         """
-        Execute one environment step.
+        Execute one environment step with IMPROVED REWARD CALCULATION.
         
         Args:
             action: 0=HOLD, 1=BUY, 2=SELL
@@ -132,12 +149,8 @@ class TradingBotEnv(gym.Env):
         current_price = self.data_source.get_market_price(self.current_step)
         
         if not (terminated or truncated):
-            # Update unrealized PnL
-            reward += self._update_unrealized_pnl(current_price)
-            
-            # Execute trading action
-            trade_reward = self._execute_trade_action(action, current_price)
-            reward += trade_reward
+            # Calculate IMPROVED reward
+            reward = self._calculate_improved_reward(action, current_price)
             
             # Check stop-loss/take-profit
             sl_tp_reward = self._check_stop_loss_take_profit(current_price)
@@ -148,8 +161,19 @@ class TradingBotEnv(gym.Env):
                 terminated = True
                 reward -= 100.0  # Penalty for blowing up
             
-            # Update equity curve
+            # Update equity curve and returns
             self.equity_curve.append(self.risk_manager.net_worth)
+            
+            # Track returns
+            portfolio_return = (self.risk_manager.net_worth - self.last_portfolio_value) / self.last_portfolio_value
+            self.recent_returns.append(portfolio_return)
+            self.last_portfolio_value = self.risk_manager.net_worth
+            
+            # Track time in position
+            if abs(self.exchange_manager.current_position) > 1e-6:
+                self.time_in_position += 1
+            else:
+                self.time_in_position = 0
             
             observation = self._get_obs(self.current_step)
         else:
@@ -165,80 +189,57 @@ class TradingBotEnv(gym.Env):
         
         return observation, reward, terminated, truncated, info
     
-    def _get_obs(self, index: int) -> Dict[str, np.ndarray]:
+    def _calculate_improved_reward(self, action: int, price: float) -> float:
         """
-        Get observation at given step.
+        IMPROVED REWARD FUNCTION with multiple components.
+        
+        Components:
+        1. PnL reward (primary)
+        2. Opportunity cost (penalty for missing trends)
+        3. Position holding bonus (let winners run)
+        4. Action penalty (trading fees)
         
         Returns:
-            Dict with 'features' and 'account'
+            total_reward: float
         """
-        # Market features
-        features = self.data_source.get_latest_observation()
+        total_reward = 0.0
         
-        # Account state
-        norm_net_worth = self.risk_manager.net_worth / self.initial_balance
+        # 1. PNL REWARD (Primary)
+        pnl_reward = self._calculate_pnl_reward(action, price)
+        total_reward += pnl_reward * self.reward_weights['pnl']
         
-        # Normalize position by max leverage
-        max_position_value = self.initial_balance * self.config.max_position_leverage
-        current_price = self.data_source.get_market_price(min(index, len(self.data_source.data_store) - 1))
-        position_value = self.exchange_manager.current_position * current_price
-        norm_position = position_value / max_position_value
+        # 2. OPPORTUNITY COST (Prevents always holding)
+        opp_cost = self._calculate_opportunity_cost(action)
+        total_reward += opp_cost * self.reward_weights['opportunity_cost']
         
-        # Volatility factor from curriculum
-        volatility_factor = self.curriculum.get_volatility_factor()
+        # 3. POSITION HOLDING BONUS (Let winners run)
+        holding_bonus = self._calculate_holding_bonus()
+        total_reward += holding_bonus * self.reward_weights['holding_bonus']
         
-        account_state = np.array([
-            norm_net_worth,
-            norm_position,
-            volatility_factor
-        ], dtype=np.float32)
+        # 4. ACTION PENALTY (Trading fees)
+        action_penalty = self._calculate_action_penalty(action, price)
+        total_reward += action_penalty * self.reward_weights['action_penalty']
         
-        return {
-            "features": features,
-            "account": account_state
-        }
+        return total_reward
     
-    def _update_unrealized_pnl(self, price: float) -> float:
-        """
-        Calculate unrealized PnL change as reward.
-        
-        Returns:
-            reward: float
-        """
-        position = self.exchange_manager.current_position
-        
-        if np.isclose(position, 0.0) or np.isclose(self.entry_price, 0.0):
-            return 0.0
-        
-        # PnL calculation
-        if position > 0:  # Long
-            pnl = (price - self.entry_price) * position
-        else:  # Short
-            pnl = (self.entry_price - price) * abs(position)
-        
-        # Reward as percentage of initial balance (normalized)
-        reward = np.tanh(pnl / self.initial_balance) * 10.0
-        
-        return reward
-    
-    def _execute_trade_action(self, action: int, price: float) -> float:
-        """
-        Execute trading action and return reward.
-        
-        Args:
-            action: 0=HOLD, 1=BUY, 2=SELL
-            price: current market price
-        
-        Returns:
-            reward: float
-        """
+    def _calculate_pnl_reward(self, action: int, price: float) -> float:
+        """Calculate PnL-based reward component."""
         action_type = {0: 'HOLD', 1: 'BUY', 2: 'SELL'}[action]
         position = self.exchange_manager.current_position
         
         if action_type == 'HOLD':
+            # Unrealized PnL for holding
+            if not np.isclose(position, 0.0) and not np.isclose(self.entry_price, 0.0):
+                if position > 0:
+                    pnl = (price - self.entry_price) * position
+                else:
+                    pnl = (self.entry_price - price) * abs(position)
+                
+                reward = np.tanh(pnl / self.initial_balance) * 10.0  # Scale up
+                return reward
             return 0.0
         
-        # Calculate position size
+        # Execute trade
         position_value = position * price
         size_usd = self.risk_manager.calculate_position_size_usd(
             price,
@@ -246,29 +247,24 @@ class TradingBotEnv(gym.Env):
             self.config.kelly_criterion_fraction
         )
         
-        # Check minimum size
         if size_usd < 10.0:
             return 0.0
         
-        # Execute order
         success, result = self.exchange_manager.execute_order(action_type, price, size_usd)
         
         if not success:
-            return -0.01  # Small penalty for failed orders
+            return -0.01
         
-        # Calculate reward based on position change
         new_position = self.exchange_manager.current_position
         reward = 0.0
         
-        # Position closed (realized PnL)
+        # Position closed (REALIZED PnL)
         if np.isclose(new_position, 0.0) and not np.isclose(position, 0.0):
-            # Calculate realized PnL
-            if position > 0:  # Closing long
+            if position > 0:
                 pnl = (price - self.entry_price) * abs(position)
-            else:  # Closing short
+            else:
                 pnl = (self.entry_price - price) * abs(position)
             
-            # Commission
             commission = abs(position) * price * self.commission
             net_pnl = pnl - commission
             
@@ -276,8 +272,18 @@ class TradingBotEnv(gym.Env):
             self.risk_manager.net_worth += net_pnl
             self.risk_manager.update_metrics(self.risk_manager.net_worth)
             
-            # Reward proportional to PnL
-            reward = (net_pnl / self.initial_balance) * 100.0
+            # BIG reward for realized PnL (scaled up significantly)
+            pnl_pct = net_pnl / self.initial_balance
+            reward = pnl_pct * 10000.0  # Very high weight on profit
+            
+            # Track win/loss streak
+            if net_pnl > 0:
+                self.consecutive_wins += 1
+                self.consecutive_losses = 0
+                self.winning_trades += 1
+            else:
+                self.consecutive_losses += 1
+                self.consecutive_wins = 0
             
             # Log trade
             self.trade_log.append({
@@ -295,14 +301,12 @@ class TradingBotEnv(gym.Env):
         elif np.isclose(position, 0.0) and not np.isclose(new_position, 0.0):
             self.entry_price = price
             
-            # Commission cost
             commission = abs(new_position) * price * self.commission
             self.risk_manager.net_worth -= commission
             
-            # Small penalty for opening (encourages selective trading)
-            reward = 0.0
+            # Small penalty for opening
+            reward = -self.commission * 5.0
             
-            # Log trade
             self.trade_log.append({
                 'step': self.current_step,
                 'action': action_type,
@@ -311,21 +315,143 @@ class TradingBotEnv(gym.Env):
                 'net_worth': self.risk_manager.net_worth
             })
         
-        # Position adjusted (partial close or add)
-        else:
-            commission = abs(new_position - position) * price * self.commission
-            self.risk_manager.net_worth -= commission
-            reward = -self.commission * 0.5
-        
         return reward
     
-    def _check_stop_loss_take_profit(self, price: float) -> float:
+    def _calculate_opportunity_cost(self, action: int) -> float:
         """
-        Check and execute stop-loss or take-profit.
+        Penalty for HOLDING when there's a strong trend.
         
-        Returns:
-            reward: float
+        THIS IS KEY: Prevents agent from learning to always hold!
         """
+        # Only penalize HOLD action
+        if action != 0:
+            return 0.0
+        
+        # Calculate trend strength
+        trend = self._calculate_trend()
+        
+        # No penalty if already positioned with trend
+        position = self.exchange_manager.current_position
+        if position > 0 and trend > 0:
+            return 0.0  # Long in uptrend = good
+        if position < 0 and trend < 0:
+            return 0.0  # Short in downtrend = good
+        
+        # Penalty for being flat or wrong-sided during trend
+        if abs(trend) > 0.015:  # 1.5% trend threshold
+            penalty = -abs(trend) * 50.0
+            
+            # Extra penalty if positioned against trend
+            if (position > 0 and trend < 0) or (position < 0 and trend > 0):
+                penalty *= 2.0
+            
+            return penalty
+        
+        return 0.0
+    
+    def _calculate_holding_bonus(self) -> float:
+        """
+        Reward HOLDING winning positions (let winners run).
+        """
+        position = self.exchange_manager.current_position
+        
+        if np.isclose(position, 0.0) or np.isclose(self.entry_price, 0.0):
+            return 0.0
+        
+        current_price = self.data_source.get_market_price(self.current_step)
+        
+        # Calculate unrealized profit percentage
+        if position > 0:
+            pnl_pct = (current_price - self.entry_price) / self.entry_price
+        else:
+            pnl_pct = (self.entry_price - current_price) / self.entry_price
+        
+        # Only reward if profitable above threshold
+        if pnl_pct > 0.02:  # 2% profit threshold
+            # Reward scales with profit and time held
+            holding_reward = pnl_pct * 100.0
+            
+            # Time bonus (capped at 50%)
+            time_bonus = min(self.time_in_position / 100.0, 0.5)
+            holding_reward *= (1.0 + time_bonus)
+            
+            return holding_reward
+        
+        return 0.0
+    
+    def _calculate_action_penalty(self, action: int, price: float) -> float:
+        """Penalize trading to discourage overtrading."""
+        if action == 0:  # HOLD
+            return 0.0
+        
+        position = self.exchange_manager.current_position
+        position_value = abs(position) * price
+        
+        # Penalty proportional to position size
+        if position_value > 0:
+            penalty = -(position_value * self.commission) / self.initial_balance * 100
+            return penalty
+        
+        return 0.0
+    
+    def _calculate_trend(self) -> float:
+        """
+        Calculate trend strength from recent price data.
+        
+        Returns: -1 to 1 (negative=downtrend, positive=uptrend)
+        """
+        lookback = min(50, self.current_step - self.config.window_size)
+        if lookback < 10:
+            return 0.0
+        
+        start_idx = self.current_step - lookback
+        end_idx = self.current_step
+        
+        prices = [self.data_source.get_market_price(i) for i in range(start_idx, end_idx)]
+        
+        # Linear regression slope
+        x = np.arange(len(prices))
+        slope = np.polyfit(x, prices, 1)[0]
+        
+        # Normalize by price
+        trend = slope / (np.mean(prices) + 1e-9)
+        
+        # Clip to [-1, 1]
+        return float(np.clip(trend * 100, -1.0, 1.0))
+    
+    def _calculate_volatility(self) -> float:
+        """Calculate recent volatility."""
+        if len(self.recent_returns) < 2:
+            return 0.02  # Default
+        
+        return float(np.std(list(self.recent_returns)))
+    
+    def _get_obs(self, index: int) -> Dict[str, np.ndarray]:
+        """Get observation at given step."""
+        features = self.data_source.get_latest_observation()
+        
+        norm_net_worth = self.risk_manager.net_worth / self.initial_balance
+        
+        max_position_value = self.initial_balance * self.config.max_position_leverage
+        current_price = self.data_source.get_market_price(min(index, len(self.data_source.data_store) - 1))
+        position_value = self.exchange_manager.current_position * current_price
+        norm_position = position_value / max_position_value
+        
+        volatility_factor = self.curriculum.get_volatility_factor()
+        
+        account_state = np.array([
+            norm_net_worth,
+            norm_position,
+            volatility_factor
+        ], dtype=np.float32)
+        
+        return {
+            "features": features,
+            "account": account_state
+        }
+    
+    def _check_stop_loss_take_profit(self, price: float) -> float:
+        """Check and execute stop-loss or take-profit."""
         position = self.exchange_manager.current_position
         
         if np.isclose(position, 0.0) or np.isclose(self.entry_price, 0.0):
@@ -333,57 +459,46 @@ class TradingBotEnv(gym.Env):
         
         reward = 0.0
         
-        if position > 0:  # Long position
+        if position > 0:
             pnl_pct = (price - self.entry_price) / self.entry_price
             
-            # Stop loss
             if pnl_pct <= -self.config.stop_loss_pct:
                 logger.info(f"🛑 Stop-loss triggered: {pnl_pct:.2%}")
                 success, _ = self.exchange_manager.execute_order('SELL', price, position * price)
                 if success:
-                    reward = -50.0  # Penalty for stop-loss
+                    reward = -10.0
             
-            # Take profit
             elif pnl_pct >= self.config.take_profit_pct:
                 logger.info(f"💰 Take-profit triggered: {pnl_pct:.2%}")
                 success, _ = self.exchange_manager.execute_order('SELL', price, position * price)
                 if success:
-                    reward = 20.0  # Reward for take-profit
+                    reward = 5.0
         
-        else:  # Short position
+        else:
             pnl_pct = (self.entry_price - price) / self.entry_price
             
-            # Stop loss
             if pnl_pct <= -self.config.stop_loss_pct:
                 logger.info(f"🛑 Stop-loss triggered: {pnl_pct:.2%}")
                 success, _ = self.exchange_manager.execute_order('BUY', price, abs(position) * price)
                 if success:
-                    reward = -50.0
+                    reward = -10.0
             
-            # Take profit
             elif pnl_pct >= self.config.take_profit_pct:
                 logger.info(f"💰 Take-profit triggered: {pnl_pct:.2%}")
                 success, _ = self.exchange_manager.execute_order('BUY', price, abs(position) * price)
                 if success:
-                    reward = 20.0
+                    reward = 5.0
         
         return reward
     
     def _close_final_position(self, price: float) -> float:
-        """
-        Close all positions at episode end.
-        
-        Returns:
-            reward: float
-        """
+        """Close all positions at episode end."""
         position = self.exchange_manager.current_position
         
         if np.isclose(position, 0.0):
-            # No position to close
             final_return = (self.risk_manager.net_worth - self.initial_balance) / self.initial_balance
             return final_return * 100.0
         
-        # Calculate final PnL
         if position > 0:
             pnl = (price - self.entry_price) * position
         else:
@@ -395,7 +510,6 @@ class TradingBotEnv(gym.Env):
         self.risk_manager.net_worth += net_pnl
         self.exchange_manager.current_position = 0.0
         
-        # Final return as reward
         final_return = (self.risk_manager.net_worth - self.initial_balance) / self.initial_balance
         
         return final_return * 100.0
@@ -414,8 +528,14 @@ class TradingBotEnv(gym.Env):
             "circuit_tripped": self.risk_manager.circuit_breaker_tripped,
             "trade_count": self.trade_count,
             "episode_reward": self.episode_reward,
-            "equity_curve": self.equity_curve[-100:],  # Last 100 steps
-            "volatility_factor": self.curriculum.get_volatility_factor()
+            "equity_curve": self.equity_curve[-100:],
+            "volatility_factor": self.curriculum.get_volatility_factor(),
+            # NEW: Additional info
+            "consecutive_wins": self.consecutive_wins,
+            "consecutive_losses": self.consecutive_losses,
+            "winning_trades": self.winning_trades,
+            "trend": self._calculate_trend(),
+            "volatility": self._calculate_volatility()
         }
     
     def render(self, mode: str = 'human'):
@@ -428,36 +548,32 @@ class TradingBotEnv(gym.Env):
             print(f"Position: {info['position']:.4f}")
             print(f"Price: ${info['current_price']:.2f}")
             print(f"Max DD: {info['max_drawdown']:.2%}")
-            print(f"Trades: {info['trade_count']}")
+            print(f"Trades: {info['trade_count']} (Win streak: {info['consecutive_wins']})")
             print(f"Episode Reward: {info['episode_reward']:.2f}")
+            print(f"Trend: {info['trend']:+.3f} | Volatility: {info['volatility']:.3f}")
             print(f"{'='*60}\n")
     
     def get_episode_statistics(self) -> Dict:
         """Calculate episode performance statistics."""
         equity = np.array(self.equity_curve)
         
-        # Returns
         returns = np.diff(equity) / equity[:-1]
         
-        # Sharpe ratio (annualized)
         if len(returns) > 1 and returns.std() > 0:
             sharpe = (returns.mean() / returns.std()) * np.sqrt(252)
         else:
             sharpe = 0.0
         
-        # Sortino ratio
         downside_returns = returns[returns < 0]
         if len(downside_returns) > 1 and downside_returns.std() > 0:
             sortino = (returns.mean() / downside_returns.std()) * np.sqrt(252)
         else:
             sortino = 0.0
         
-        # Win rate
         winning_trades = sum(1 for t in self.trade_log if t.get('pnl', 0) > 0)
         total_trades = len([t for t in self.trade_log if 'pnl' in t])
         win_rate = winning_trades / total_trades if total_trades > 0 else 0.0
         
-        # Total return
         total_return = (equity[-1] - equity[0]) / equity[0]
         
         return {
@@ -467,5 +583,6 @@ class TradingBotEnv(gym.Env):
             'max_drawdown': self.risk_manager.max_drawdown,
             'win_rate': win_rate,
             'total_trades': total_trades,
-            'final_net_worth': equity[-1]
+            'final_net_worth': equity[-1],
+            'winning_trades': self.winning_trades
         }
